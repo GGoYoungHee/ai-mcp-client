@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Send, Trash2, Bot, User, Copy, Check, Plus, MessageSquare, Menu, X, Settings } from "lucide-react";
+import { Send, Trash2, Bot, User, Copy, Check, Plus, MessageSquare, Menu, X, Settings, Wrench, ToggleLeft, ToggleRight } from "lucide-react";
 import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -20,6 +20,14 @@ import {
   type ChatSession,
   type Message,
 } from "@/lib/supabase";
+import { useMCP } from "@/lib/mcp/context";
+import type { ToolCallInfo } from "@/lib/mcp/types";
+import { ToolCallsDisplay } from "@/components/chat/ToolCallCard";
+
+// Extended message type with tool calls
+interface ExtendedMessage extends Message {
+  toolCalls?: ToolCallInfo[];
+}
 
 // CodeBlock Component
 const CodeBlock = ({node, inline, className, children, ...props}: any) => {
@@ -63,13 +71,27 @@ const CodeBlock = ({node, inline, className, children, ...props}: any) => {
 export default function Home() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<ExtendedMessage[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [mounted, setMounted] = useState(false);
+  const [mcpEnabled, setMcpEnabled] = useState(true);
+  const [currentToolCalls, setCurrentToolCalls] = useState<ToolCallInfo[]>([]);
+  
+  // MCP context for connection status
+  const { statuses, capabilities } = useMCP();
+  
+  // Count connected servers with tools
+  const connectedServersWithTools = Array.from(statuses.entries()).filter(([serverId, status]) => {
+    if (status.status !== "connected") return false;
+    const caps = capabilities.get(serverId);
+    return caps && caps.tools.length > 0;
+  }).length;
+  
+  const totalToolsCount = Array.from(capabilities.values()).reduce((sum, cap) => sum + cap.tools.length, 0);
 
   // Migrate localStorage data to Supabase DB
   const migrateLocalStorageToDb = useCallback(async () => {
@@ -236,15 +258,88 @@ export default function Home() {
     }
   };
 
+  // Parse SSE stream with tool call markers
+  const parseStreamContent = (buffer: string) => {
+    const toolCalls: ToolCallInfo[] = [];
+    
+    // Helper function to extract content between markers
+    const extractBetweenMarkers = (str: string, startMarker: string, endMarker: string): string[] => {
+      const results: string[] = [];
+      let searchStart = 0;
+      
+      while (true) {
+        const startIdx = str.indexOf(startMarker, searchStart);
+        if (startIdx === -1) break;
+        
+        const contentStart = startIdx + startMarker.length;
+        const endIdx = str.indexOf(endMarker, contentStart);
+        if (endIdx === -1) break;
+        
+        results.push(str.substring(contentStart, endIdx));
+        searchStart = endIdx + endMarker.length;
+      }
+      
+      return results;
+    };
+    
+    // Parse tool call starts
+    const toolCallContents = extractBetweenMarkers(buffer, "[TOOL_CALL]", "[/TOOL_CALL]");
+    for (const content of toolCallContents) {
+      try {
+        const parsed = JSON.parse(content);
+        toolCalls.push(parsed);
+      } catch (e) {
+        console.error("Failed to parse tool call:", e, content);
+      }
+    }
+    
+    // Parse tool call results (updates) - these have the final result
+    const toolResultContents = extractBetweenMarkers(buffer, "[TOOL_RESULT]", "[/TOOL_RESULT]");
+    for (const content of toolResultContents) {
+      try {
+        const result: ToolCallInfo = JSON.parse(content);
+        const existingIndex = toolCalls.findIndex(tc => tc.id === result.id);
+        if (existingIndex >= 0) {
+          toolCalls[existingIndex] = result;
+        } else {
+          toolCalls.push(result);
+        }
+      } catch (e) {
+        console.error("Failed to parse tool result:", e, content);
+      }
+    }
+    
+    // Extract text content
+    let text = "";
+    const textContents = extractBetweenMarkers(buffer, "[TEXT]", "[/TEXT]");
+    if (textContents.length > 0) {
+      text = textContents[textContents.length - 1]; // Get the last text content
+    } else {
+      // If no markers at all, treat the whole buffer as text (for non-tool responses)
+      const hasAnyMarkers = buffer.includes("[TOOL_CALL]") || buffer.includes("[TEXT]");
+      if (!hasAnyMarkers) {
+        text = buffer;
+      }
+    }
+    
+    // Debug log
+    if (toolCalls.length > 0) {
+      console.log("Parsed tool calls:", toolCalls);
+    }
+    
+    return { toolCalls, text };
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
-    const userMessage: Message = { role: "user", content: input };
+    const userMessage: ExtendedMessage = { role: "user", content: input };
     const currentInput = input;
     
     setInput("");
     setIsLoading(true);
+    setCurrentToolCalls([]);
 
     let activeSessionId = currentSessionId;
 
@@ -264,7 +359,10 @@ export default function Home() {
       const response = await fetch(`/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: newMessages }),
+        body: JSON.stringify({ 
+          messages: newMessages.map(m => ({ role: m.role, content: m.content })),
+          mcpEnabled 
+        }),
       });
 
       if (!response.ok) throw new Error("Network response was not ok");
@@ -274,43 +372,69 @@ export default function Home() {
       const decoder = new TextDecoder();
       
       // Add empty assistant message for streaming
-      const assistantMessage: Message = { role: "assistant", content: "" };
+      const assistantMessage: ExtendedMessage = { role: "assistant", content: "", toolCalls: [] };
       setMessages((prev) => [...prev, assistantMessage]);
       
       // Save empty assistant message to DB (will update later)
-      await saveMessage(activeSessionId, assistantMessage);
+      await saveMessage(activeSessionId, { role: "assistant", content: "" });
 
-      let fullContent = "";
+      let fullBuffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
         const chunk = decoder.decode(value, { stream: true });
-        fullContent += chunk;
+        fullBuffer += chunk;
         
+        // Parse the buffer for tool calls and text
+        const { toolCalls, text } = parseStreamContent(fullBuffer);
+        
+        // Update current tool calls for live display (shown in loading indicator)
+        setCurrentToolCalls([...toolCalls]);
+        
+        // Update messages with parsed content (immutable update)
         setMessages((prev) => {
-          const updated = [...prev];
-          const lastMsg = updated[updated.length - 1];
-          if (lastMsg.role === "assistant") {
-            lastMsg.content += chunk;
+          const updated = prev.slice(0, -1);
+          const lastMsg = prev[prev.length - 1];
+          if (lastMsg && lastMsg.role === "assistant") {
+            return [...updated, { ...lastMsg, toolCalls: [...toolCalls], content: text }];
           }
-          return updated;
+          return prev;
         });
       }
 
+      // Final parse
+      const { toolCalls: finalToolCalls, text: finalText } = parseStreamContent(fullBuffer);
+      
+      console.log("Final parsed:", { toolCalls: finalToolCalls, text: finalText });
+      
+      // Update final message state with tool calls preserved (immutable update)
+      setMessages((prev) => {
+        const updated = prev.slice(0, -1);
+        const lastMsg = prev[prev.length - 1];
+        if (lastMsg && lastMsg.role === "assistant") {
+          return [...updated, { ...lastMsg, toolCalls: [...finalToolCalls], content: finalText }];
+        }
+        return prev;
+      });
+      
       // Update the assistant message in DB with full content
-      await updateLastMessage(activeSessionId, fullContent);
+      await updateLastMessage(activeSessionId, finalText);
+      
+      // Clear current tool calls (loading indicator)
+      setCurrentToolCalls([]);
 
     } catch (error) {
       console.error("Error:", error);
-      const errorMessage: Message = { 
+      const errorMessage: ExtendedMessage = { 
         role: "assistant", 
         content: "Error generating response. Please try again." 
       };
       setMessages((prev) => [...prev, errorMessage]);
-      await saveMessage(activeSessionId, errorMessage);
+      await saveMessage(activeSessionId, { role: "assistant", content: errorMessage.content });
     } finally {
       setIsLoading(false);
+      setCurrentToolCalls([]);
     }
   };
 
@@ -412,13 +536,38 @@ export default function Home() {
                 </div>
                 <h1 className="text-lg font-semibold">Gemini Chat</h1>
             </div>
-            <Link
-                href="/mcp"
-                className="p-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full transition-colors"
-                title="MCP 서버 관리"
-            >
-                <Settings size={20} />
-            </Link>
+            <div className="flex items-center gap-2">
+                {/* MCP Tools Toggle */}
+                <button
+                    onClick={() => setMcpEnabled(!mcpEnabled)}
+                    className={cn(
+                        "flex items-center gap-2 px-3 py-1.5 rounded-full text-sm font-medium transition-all",
+                        mcpEnabled && connectedServersWithTools > 0
+                            ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-400"
+                            : "bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400"
+                    )}
+                    title={mcpEnabled ? "MCP 도구 비활성화" : "MCP 도구 활성화"}
+                >
+                    <Wrench size={14} />
+                    <span className="hidden sm:inline">
+                        {connectedServersWithTools > 0 
+                            ? `${totalToolsCount} Tools` 
+                            : "No Tools"}
+                    </span>
+                    {mcpEnabled ? (
+                        <ToggleRight size={18} className="text-emerald-500" />
+                    ) : (
+                        <ToggleLeft size={18} />
+                    )}
+                </button>
+                <Link
+                    href="/mcp"
+                    className="p-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full transition-colors"
+                    title="MCP 서버 관리"
+                >
+                    <Settings size={20} />
+                </Link>
+            </div>
         </header>
 
         {/* Chat Area */}
@@ -454,26 +603,34 @@ export default function Home() {
                                 <div className="whitespace-pre-wrap">{msg.content}</div>
                             ) : (
                                 <div className="markdown-body">
-                                    <ReactMarkdown
-                                        remarkPlugins={[remarkGfm]}
-                                        components={{
-                                            code: CodeBlock,
-                                            ul: ({children}) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
-                                            ol: ({children}) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
-                                            li: ({children}) => <li className="mb-1">{children}</li>,
-                                            p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
-                                            h1: ({children}) => <h1 className="text-2xl font-bold mb-2 mt-4">{children}</h1>,
-                                            h2: ({children}) => <h2 className="text-xl font-bold mb-2 mt-3">{children}</h2>,
-                                            h3: ({children}) => <h3 className="text-lg font-bold mb-1 mt-2">{children}</h3>,
-                                            blockquote: ({children}) => <blockquote className="border-l-4 border-gray-300 pl-4 italic my-2">{children}</blockquote>,
-                                            a: ({href, children}) => <a href={href} className="text-blue-500 hover:underline" target="_blank" rel="noopener noreferrer">{children}</a>,
-                                            table: ({children}) => <div className="overflow-x-auto mb-2"><table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700">{children}</table></div>,
-                                            th: ({children}) => <th className="px-3 py-2 bg-gray-100 dark:bg-gray-800 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-b">{children}</th>,
-                                            td: ({children}) => <td className="px-3 py-2 whitespace-nowrap text-sm border-b dark:border-gray-700">{children}</td>,
-                                        }}
-                                    >
-                                        {msg.content}
-                                    </ReactMarkdown>
+                                    {/* Tool Calls Display */}
+                                    {msg.toolCalls && msg.toolCalls.length > 0 && (
+                                        <ToolCallsDisplay toolCalls={msg.toolCalls} />
+                                    )}
+                                    
+                                    {/* Text Content */}
+                                    {msg.content && (
+                                        <ReactMarkdown
+                                            remarkPlugins={[remarkGfm]}
+                                            components={{
+                                                code: CodeBlock,
+                                                ul: ({children}) => <ul className="list-disc pl-4 mb-2 space-y-1">{children}</ul>,
+                                                ol: ({children}) => <ol className="list-decimal pl-4 mb-2 space-y-1">{children}</ol>,
+                                                li: ({children}) => <li className="mb-1">{children}</li>,
+                                                p: ({children}) => <p className="mb-2 last:mb-0">{children}</p>,
+                                                h1: ({children}) => <h1 className="text-2xl font-bold mb-2 mt-4">{children}</h1>,
+                                                h2: ({children}) => <h2 className="text-xl font-bold mb-2 mt-3">{children}</h2>,
+                                                h3: ({children}) => <h3 className="text-lg font-bold mb-1 mt-2">{children}</h3>,
+                                                blockquote: ({children}) => <blockquote className="border-l-4 border-gray-300 pl-4 italic my-2">{children}</blockquote>,
+                                                a: ({href, children}) => <a href={href} className="text-blue-500 hover:underline" target="_blank" rel="noopener noreferrer">{children}</a>,
+                                                table: ({children}) => <div className="overflow-x-auto mb-2"><table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700">{children}</table></div>,
+                                                th: ({children}) => <th className="px-3 py-2 bg-gray-100 dark:bg-gray-800 text-left text-xs font-medium text-gray-500 uppercase tracking-wider border-b">{children}</th>,
+                                                td: ({children}) => <td className="px-3 py-2 whitespace-nowrap text-sm border-b dark:border-gray-700">{children}</td>,
+                                            }}
+                                        >
+                                            {msg.content}
+                                        </ReactMarkdown>
+                                    )}
                                 </div>
                             )}
                         </div>
@@ -490,12 +647,18 @@ export default function Home() {
                         <div className="w-8 h-8 rounded-full bg-blue-600 flex-shrink-0 flex items-center justify-center text-white mt-1">
                             <Bot size={16} />
                         </div>
-                        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-4 py-3 rounded-2xl rounded-bl-sm shadow-sm">
-                            <div className="flex gap-1 h-6 items-center">
-                                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
-                                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
-                                <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
-                            </div>
+                        <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 px-4 py-3 rounded-2xl rounded-bl-sm shadow-sm max-w-[85%] sm:max-w-[75%]">
+                            {/* Show current tool calls while loading */}
+                            {currentToolCalls.length > 0 && (
+                                <ToolCallsDisplay toolCalls={currentToolCalls} />
+                            )}
+                            {currentToolCalls.length === 0 && (
+                                <div className="flex gap-1 h-6 items-center">
+                                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                                </div>
+                            )}
                         </div>
                      </div>
                 )}

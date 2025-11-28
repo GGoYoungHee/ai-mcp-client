@@ -18,21 +18,27 @@ interface ManagedClient {
   capabilities: MCPServerCapabilities | null;
 }
 
+// Extend globalThis type for TypeScript
+declare global {
+  // eslint-disable-next-line no-var
+  var __mcpClientManager: MCPClientManager | undefined;
+}
+
 /**
  * Singleton MCP Client Manager
  * Manages multiple MCP client connections
+ * Uses globalThis to persist across Next.js hot reloads
  */
 class MCPClientManager {
-  private static instance: MCPClientManager;
   private clients: Map<string, ManagedClient> = new Map();
 
-  private constructor() {}
+  constructor() {}
 
   static getInstance(): MCPClientManager {
-    if (!MCPClientManager.instance) {
-      MCPClientManager.instance = new MCPClientManager();
+    if (!globalThis.__mcpClientManager) {
+      globalThis.__mcpClientManager = new MCPClientManager();
     }
-    return MCPClientManager.instance;
+    return globalThis.__mcpClientManager;
   }
 
   /**

@@ -82,16 +82,116 @@ export function MCPProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Load servers from localStorage and sync statuses on mount
+  // Auto-connect enabled servers
+  const autoConnectServers = useCallback(async (serverList: MCPServerConfig[]) => {
+    const enabledServers = serverList.filter((s) => s.enabled);
+    
+    for (const server of enabledServers) {
+      // Check if already connected
+      const currentStatus = await fetch(`/api/mcp/status?serverId=${server.id}`)
+        .then((res) => res.json())
+        .catch(() => null);
+      
+      if (currentStatus?.data?.status === "connected") {
+        // Already connected, just update local state
+        setStatuses((prev) => {
+          const next = new Map(prev);
+          next.set(server.id, currentStatus.data);
+          return next;
+        });
+        
+        // Fetch capabilities
+        try {
+          const capResponse = await fetch(`/api/mcp/capabilities?serverId=${server.id}`);
+          const capResult = await capResponse.json();
+          if (capResult.success && capResult.data) {
+            setCapabilities((prev) => {
+              const next = new Map(prev);
+              next.set(server.id, capResult.data);
+              return next;
+            });
+          }
+        } catch (e) {
+          console.error("Failed to fetch capabilities:", e);
+        }
+        continue;
+      }
+      
+      // Not connected, attempt to connect
+      try {
+        setStatuses((prev) => {
+          const next = new Map(prev);
+          next.set(server.id, { serverId: server.id, status: "connecting" });
+          return next;
+        });
+
+        const response = await fetch("/api/mcp/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(server),
+        });
+
+        const result = await response.json();
+
+        if (result.success && result.data) {
+          setStatuses((prev) => {
+            const next = new Map(prev);
+            next.set(server.id, result.data);
+            return next;
+          });
+
+          // Fetch capabilities if connected
+          if (result.data.status === "connected") {
+            try {
+              const capResponse = await fetch(`/api/mcp/capabilities?serverId=${server.id}`);
+              const capResult = await capResponse.json();
+              if (capResult.success && capResult.data) {
+                setCapabilities((prev) => {
+                  const next = new Map(prev);
+                  next.set(server.id, capResult.data);
+                  return next;
+                });
+              }
+            } catch (e) {
+              console.error("Failed to fetch capabilities:", e);
+            }
+          }
+        } else {
+          setStatuses((prev) => {
+            const next = new Map(prev);
+            next.set(server.id, {
+              serverId: server.id,
+              status: "error",
+              error: result.error ?? "Connection failed",
+            });
+            return next;
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to auto-connect server ${server.id}:`, error);
+        setStatuses((prev) => {
+          const next = new Map(prev);
+          next.set(server.id, {
+            serverId: server.id,
+            status: "error",
+            error: error instanceof Error ? error.message : "Connection failed",
+          });
+          return next;
+        });
+      }
+    }
+  }, []);
+
+  // Load servers from localStorage and auto-connect enabled servers on mount
   useEffect(() => {
     const loadedServers = mcpStorage.getServers();
     setServers(loadedServers);
     
-    // Sync connection statuses from server
-    syncStatuses().finally(() => {
+    // Auto-connect enabled servers
+    autoConnectServers(loadedServers).finally(() => {
       setIsLoading(false);
     });
-  }, [syncStatuses]);
+  }, [autoConnectServers]);
 
   // Add server
   const addServer = useCallback((config: Omit<MCPServerConfig, "id" | "createdAt" | "updatedAt">) => {

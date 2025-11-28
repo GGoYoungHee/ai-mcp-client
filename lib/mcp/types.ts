@@ -110,3 +110,18 @@ export interface MCPExportData {
   servers: Omit<MCPServerConfig, "id" | "createdAt" | "updatedAt">[];
 }
 
+// Tool Call Info for Chat UI
+export type ToolCallStatus = "calling" | "success" | "error";
+
+export interface ToolCallInfo {
+  id: string;
+  toolName: string;
+  serverId: string;
+  arguments?: Record<string, unknown>;
+  status: ToolCallStatus;
+  result?: unknown;
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
+}
+
