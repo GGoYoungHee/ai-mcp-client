@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Send, Trash2, Bot, User, Copy, Check, Plus, MessageSquare, Menu, X } from "lucide-react";
+import { Send, Trash2, Bot, User, Copy, Check, Plus, MessageSquare, Menu, X, Settings } from "lucide-react";
+import Link from "next/link";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
@@ -411,6 +412,13 @@ export default function Home() {
                 </div>
                 <h1 className="text-lg font-semibold">Gemini Chat</h1>
             </div>
+            <Link
+                href="/mcp"
+                className="p-2 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-full transition-colors"
+                title="MCP 서버 관리"
+            >
+                <Settings size={20} />
+            </Link>
         </header>
 
         {/* Chat Area */}
