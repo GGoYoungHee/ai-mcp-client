@@ -783,7 +783,7 @@ export default function MCPPage() {
         const data: MCPExportData = JSON.parse(event.target?.result as string);
         const merge = confirm("기존 서버 설정에 병합하시겠습니까?\n(취소를 누르면 기존 설정을 덮어씁니다)");
         importConfig(data, merge);
-      } catch (error) {
+      } catch (_error) {
         alert("잘못된 파일 형식입니다.");
       }
     };

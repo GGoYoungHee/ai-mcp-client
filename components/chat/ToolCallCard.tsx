@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { Loader2, CheckCircle, XCircle, Wrench, Download, ZoomIn } from "lucide-react";
 import type { ToolCallInfo } from "@/lib/mcp/types";
 import { cn } from "@/lib/utils";
@@ -87,11 +88,14 @@ function ImageResult({ image, index }: { image: MCPImageContent; index: number }
   return (
     <>
       <div className="relative group">
-        <img
+        <Image
           src={imageSrc}
           alt={`Generated image ${index + 1}`}
+          width={512}
+          height={512}
           className="max-w-full h-auto rounded-lg border border-gray-200 dark:border-gray-700 cursor-pointer transition-transform hover:scale-[1.02]"
           onClick={() => setIsZoomed(true)}
+          unoptimized
         />
         <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
           <button
@@ -124,10 +128,13 @@ function ImageResult({ image, index }: { image: MCPImageContent; index: number }
           onClick={() => setIsZoomed(false)}
         >
           <div className="relative max-w-[90vw] max-h-[90vh]">
-            <img
+            <Image
               src={imageSrc}
               alt={`Generated image ${index + 1}`}
+              width={1024}
+              height={1024}
               className="max-w-full max-h-[90vh] object-contain rounded-lg"
+              unoptimized
             />
             <button
               onClick={handleDownload}

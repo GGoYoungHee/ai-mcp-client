@@ -31,7 +31,13 @@ interface ExtendedMessage extends Message {
 }
 
 // CodeBlock Component
-const CodeBlock = ({node, inline, className, children, ...props}: any) => {
+interface CodeBlockProps {
+  inline?: boolean;
+  className?: string;
+  children?: React.ReactNode;
+}
+
+const CodeBlock = ({inline, className, children, ...props}: CodeBlockProps) => {
   const match = /language-(\w+)/.exec(className || '');
   const [copied, setCopied] = useState(false);
 
@@ -340,7 +346,6 @@ export default function Home() {
     if (!input.trim() || isLoading) return;
 
     const userMessage: ExtendedMessage = { role: "user", content: input };
-    const currentInput = input;
     
     setInput("");
     setIsLoading(true);
@@ -588,7 +593,7 @@ export default function Home() {
                     <div className="flex flex-col items-center justify-center h-[60vh] text-gray-400 text-center">
                         <Bot size={48} className="mb-4 opacity-20" />
                         <p className="text-lg">Start a conversation with Gemini</p>
-                        <p className="text-sm mt-2">"Tell me a joke" or "Explain quantum physics"</p>
+                        <p className="text-sm mt-2">&quot;Tell me a joke&quot; or &quot;Explain quantum physics&quot;</p>
                     </div>
                 )}
                 

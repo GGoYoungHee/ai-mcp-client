@@ -47,41 +47,6 @@ export function MCPProvider({ children }: { children: ReactNode }) {
   const [capabilities, setCapabilities] = useState<Map<string, MCPServerCapabilities>>(new Map());
   const [isLoading, setIsLoading] = useState(true);
 
-  // Sync server statuses from backend
-  const syncStatuses = useCallback(async () => {
-    try {
-      const response = await fetch("/api/mcp/status");
-      const result: MCPApiResponse<MCPServerStatus[]> = await response.json();
-      
-      if (result.success && result.data) {
-        const statusMap = new Map<string, MCPServerStatus>();
-        for (const status of result.data) {
-          statusMap.set(status.serverId, status);
-          
-          // Also fetch capabilities for connected servers
-          if (status.status === "connected") {
-            try {
-              const capResponse = await fetch(`/api/mcp/capabilities?serverId=${status.serverId}`);
-              const capResult: MCPApiResponse<MCPServerCapabilities> = await capResponse.json();
-              if (capResult.success && capResult.data) {
-                setCapabilities((prev) => {
-                  const next = new Map(prev);
-                  next.set(status.serverId, capResult.data!);
-                  return next;
-                });
-              }
-            } catch (e) {
-              console.error("Failed to fetch capabilities:", e);
-            }
-          }
-        }
-        setStatuses(statusMap);
-      }
-    } catch (error) {
-      console.error("Failed to sync statuses:", error);
-    }
-  }, []);
-
   // Auto-connect enabled servers
   const autoConnectServers = useCallback(async (serverList: MCPServerConfig[]) => {
     const enabledServers = serverList.filter((s) => s.enabled);
@@ -228,6 +193,27 @@ export function MCPProvider({ children }: { children: ReactNode }) {
     return success;
   }, []);
 
+  // Refresh capabilities
+  const refreshCapabilities = useCallback(async (serverId: string): Promise<MCPServerCapabilities | null> => {
+    try {
+      const response = await fetch(`/api/mcp/capabilities?serverId=${serverId}`);
+      const result: MCPApiResponse<MCPServerCapabilities> = await response.json();
+
+      if (result.success && result.data) {
+        setCapabilities((prev) => {
+          const next = new Map(prev);
+          next.set(serverId, result.data!);
+          return next;
+        });
+        return result.data;
+      }
+      return null;
+    } catch (error) {
+      console.error("Failed to refresh capabilities:", error);
+      return null;
+    }
+  }, []);
+
   // Connect to server
   const connect = useCallback(async (serverId: string): Promise<MCPServerStatus> => {
     const server = servers.find((s) => s.id === serverId);
@@ -290,7 +276,7 @@ export function MCPProvider({ children }: { children: ReactNode }) {
       });
       return errorStatus;
     }
-  }, [servers]);
+  }, [servers, refreshCapabilities]);
 
   // Disconnect from server
   const disconnect = useCallback(async (serverId: string): Promise<MCPServerStatus> => {
@@ -318,7 +304,7 @@ export function MCPProvider({ children }: { children: ReactNode }) {
       });
 
       return status;
-    } catch (error) {
+    } catch (_error) {
       const status: MCPServerStatus = { serverId, status: "disconnected" };
       setStatuses((prev) => {
         const next = new Map(prev);
@@ -326,27 +312,6 @@ export function MCPProvider({ children }: { children: ReactNode }) {
         return next;
       });
       return status;
-    }
-  }, []);
-
-  // Refresh capabilities
-  const refreshCapabilities = useCallback(async (serverId: string): Promise<MCPServerCapabilities | null> => {
-    try {
-      const response = await fetch(`/api/mcp/capabilities?serverId=${serverId}`);
-      const result: MCPApiResponse<MCPServerCapabilities> = await response.json();
-
-      if (result.success && result.data) {
-        setCapabilities((prev) => {
-          const next = new Map(prev);
-          next.set(serverId, result.data!);
-          return next;
-        });
-        return result.data;
-      }
-      return null;
-    } catch (error) {
-      console.error("Failed to refresh capabilities:", error);
-      return null;
     }
   }, []);
 

@@ -20,7 +20,6 @@ interface ManagedClient {
 
 // Extend globalThis type for TypeScript
 declare global {
-  // eslint-disable-next-line no-var
   var __mcpClientManager: MCPClientManager | undefined;
 }
 
@@ -49,12 +48,6 @@ class MCPClientManager {
     if (existingClient?.status.status === "connected") {
       return existingClient.status;
     }
-
-    // Update status to connecting
-    const status: MCPServerStatus = {
-      serverId: config.id,
-      status: "connecting",
-    };
 
     try {
       const client = new Client({
