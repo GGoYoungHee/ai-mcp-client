@@ -10,13 +10,14 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { generateId, formatDate, cn } from "@/lib/utils";
 import {
   getSessions,
-  getMessages,
+  getMessagesExtended,
   createSession as dbCreateSession,
   saveMessage,
   deleteSession as dbDeleteSession,
   hasAnySessions,
   saveMessages,
-  updateLastMessage,
+  updateMessageById,
+  encodeExtendedMessage,
   type ChatSession,
   type Message,
 } from "@/lib/supabase";
@@ -162,10 +163,14 @@ export default function Home() {
     return true;
   }, []);
 
-  // Load session messages from DB
+  // Load session messages from DB (with tool calls)
   const loadSessionMessages = useCallback(async (sessionId: string) => {
-    const msgs = await getMessages(sessionId);
-    setMessages(msgs);
+    const msgs = await getMessagesExtended(sessionId);
+    setMessages(msgs.map(m => ({
+      role: m.role,
+      content: m.content,
+      toolCalls: m.toolCalls as ToolCallInfo[] | undefined,
+    })));
   }, []);
 
   // Initial Load & Migration
@@ -355,13 +360,21 @@ export default function Home() {
     // Save user message to DB
     await saveMessage(activeSessionId, userMessage);
 
+    // Save empty assistant message to DB first to get message_id
+    const assistantMessageId = await saveMessage(activeSessionId, { role: "assistant", content: "" });
+    
+    if (!assistantMessageId) {
+      throw new Error("Failed to create assistant message");
+    }
+
     try {
       const response = await fetch(`/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           messages: newMessages.map(m => ({ role: m.role, content: m.content })),
-          mcpEnabled 
+          mcpEnabled,
+          messageId: assistantMessageId, // Pass message ID for image linking
         }),
       });
 
@@ -374,9 +387,6 @@ export default function Home() {
       // Add empty assistant message for streaming
       const assistantMessage: ExtendedMessage = { role: "assistant", content: "", toolCalls: [] };
       setMessages((prev) => [...prev, assistantMessage]);
-      
-      // Save empty assistant message to DB (will update later)
-      await saveMessage(activeSessionId, { role: "assistant", content: "" });
 
       let fullBuffer = "";
 
@@ -418,8 +428,9 @@ export default function Home() {
         return prev;
       });
       
-      // Update the assistant message in DB with full content
-      await updateLastMessage(activeSessionId, finalText);
+      // Update the assistant message in DB with full content (including tool calls)
+      const encodedContent = encodeExtendedMessage(finalText, finalToolCalls);
+      await updateMessageById(assistantMessageId, encodedContent);
       
       // Clear current tool calls (loading indicator)
       setCurrentToolCalls([]);

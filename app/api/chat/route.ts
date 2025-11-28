@@ -2,6 +2,95 @@ import { GoogleGenAI, Type, FunctionDeclaration } from "@google/genai";
 import { NextRequest } from "next/server";
 import { mcpClientManager } from "@/lib/mcp/client-manager";
 import type { ToolCallInfo } from "@/lib/mcp/types";
+import { uploadChatImage, saveChatImageMetadata } from "@/lib/supabase";
+
+// Types for MCP result content
+interface MCPImageContent {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+interface MCPTextContent {
+  type: "text";
+  text: string;
+}
+
+type MCPContent = MCPImageContent | MCPTextContent;
+
+interface MCPResult {
+  content?: MCPContent[];
+}
+
+// Extended content with storage URL and path
+interface StorageImageContent {
+  type: "image";
+  data: string;
+  mimeType: string;
+  storageUrl?: string;
+  storagePath?: string;
+}
+
+/**
+ * Process MCP result and upload any images to Storage
+ * Also saves image metadata to chat_images table with message_id
+ * Returns the result with storage URLs added to image content
+ */
+async function processResultImages(
+  result: unknown,
+  toolCallId: string,
+  messageId?: string
+): Promise<unknown> {
+  if (!result || typeof result !== "object") return result;
+
+  const mcpResult = result as MCPResult;
+  if (!mcpResult.content || !Array.isArray(mcpResult.content)) return result;
+
+  const processedContent: (MCPContent | StorageImageContent)[] = [];
+
+  for (const item of mcpResult.content) {
+    if (item.type === "image" && typeof item.data === "string") {
+      const mimeType = item.mimeType || "image/png";
+      
+      // Upload image to Storage
+      const uploadResult = await uploadChatImage(
+        item.data,
+        mimeType,
+        toolCallId
+      );
+
+      if (uploadResult) {
+        // Add storage URL to the image content
+        processedContent.push({
+          ...item,
+          storageUrl: uploadResult.url,
+          storagePath: uploadResult.path,
+        } as StorageImageContent);
+        
+        // Save image metadata to DB with message_id
+        await saveChatImageMetadata(
+          messageId, // Now we have the actual message_id!
+          uploadResult.path,
+          mimeType,
+          toolCallId
+        );
+        
+        console.log(`Image uploaded and metadata saved with message_id ${messageId}: ${uploadResult.url}`);
+      } else {
+        // Keep original if upload failed
+        processedContent.push(item);
+        console.error("Failed to upload image to Storage");
+      }
+    } else {
+      processedContent.push(item);
+    }
+  }
+
+  return {
+    ...mcpResult,
+    content: processedContent,
+  };
+}
 
 // Convert MCP tool schema to Gemini function declaration format
 function convertToGeminiFunctions(tools: Array<{
@@ -115,7 +204,7 @@ async function getConnectedMCPTools() {
 
 export async function POST(req: NextRequest) {
   try {
-    const { messages, mcpEnabled = true } = await req.json();
+    const { messages, mcpEnabled = true, messageId } = await req.json();
     const apiKey = process.env.GEMINI_API_KEY;
 
     if (!apiKey) {
@@ -210,9 +299,12 @@ Use tools when appropriate to help the user with accurate information.` : ""}`,
                     fnCall.args as Record<string, unknown>
                   );
                   
-                  // Update tool call info with result
+                  // Process images in result and upload to Storage (with message_id for DB linking)
+                  const processedResult = await processResultImages(result, toolCallId, messageId);
+                  
+                  // Update tool call info with processed result (includes storage URLs)
                   toolCallInfo.status = "success";
-                  toolCallInfo.result = result;
+                  toolCallInfo.result = processedResult;
                   toolCallInfo.completedAt = Date.now();
                   toolCalls.push(toolCallInfo);
                   
